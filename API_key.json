@@ -1,0 +1,5 @@
+{
+  "OPENROUTER_API_KEY": "sk-xxxxx0123456789ioxxxxx",
+  "OPENROUTER_BASE_URL": "https://example_base_url.com/v1",
+  "MEMENTO_MINI_MODEL": "DeepSeek-V4-Flash"
+}
