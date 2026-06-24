@@ -34,6 +34,13 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 
+def configure_utf8_stdio() -> None:
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name)
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 @dataclass
 class Block:
     block_id: str
@@ -108,6 +115,8 @@ def extract_pdf_text(pdf_path: Path) -> List[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0:
         raise SystemExit(proc.stderr.strip() or "pdftotext failed")
@@ -467,6 +476,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_utf8_stdio()
     args = build_arg_parser().parse_args()
     pdf_path = Path(args.pdf)
     if not pdf_path.exists():

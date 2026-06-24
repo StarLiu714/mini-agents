@@ -36,6 +36,13 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
+def configure_utf8_stdio() -> None:
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name)
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 SKIP_ENVS = {
     "algorithm",
     "algorithmic",
@@ -338,7 +345,7 @@ def find_tex_files(paths: Sequence[str]) -> List[Path]:
 
 
 def strip_disabled_conditionals(text: str) -> str:
-    """Remove disabled manuscript blocks such as \iffalse ... \fi.
+    r"""Remove disabled manuscript blocks such as \iffalse ... \fi.
 
     LaTeX conditionals can nest, so this uses a small token scanner instead of
     a non-greedy regex. It only starts removal at \iffalse; nested \if... tokens
@@ -712,6 +719,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_utf8_stdio()
     args = build_arg_parser().parse_args()
     files = find_tex_files(args.paths)
     if not files:
