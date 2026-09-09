@@ -36,13 +36,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-def configure_utf8_stdio() -> None:
-    for stream_name in ("stdin", "stdout", "stderr"):
-        stream = getattr(sys, stream_name)
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
-
-
 SKIP_ENVS = {
     "algorithm",
     "algorithmic",
@@ -345,7 +338,7 @@ def find_tex_files(paths: Sequence[str]) -> List[Path]:
 
 
 def strip_disabled_conditionals(text: str) -> str:
-    r"""Remove disabled manuscript blocks such as \iffalse ... \fi.
+    """Remove disabled manuscript blocks such as \iffalse ... \fi.
 
     LaTeX conditionals can nest, so this uses a small token scanner instead of
     a non-greedy regex. It only starts removal at \iffalse; nested \if... tokens
@@ -474,6 +467,10 @@ def split_latex_chunks(text: str) -> List[str]:
             flush()
             chunks.append(line)
             continue
+        if re.match(r"\s*\\caption(?:\[[^\]]*\])?\{", line):
+            flush()
+            chunks.append(line)
+            continue
         if is_structural_line(line):
             flush()
             chunks.append(line)
@@ -496,20 +493,30 @@ def update_env_stack(chunk: str, stack: List[str]) -> None:
 
 
 def remove_latex_noise(text: str) -> str:
-    text = re.sub(r"%.*", " ", text)
+    text = re.sub(r"(?<!\\)%.*", " ", text)
+    text = re.sub(r"^\s*\\caption(?:\[[^\]]*\])?\{(.*)\}\s*$", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"\$[^$]*\$", " MATH ", text)
     text = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?", " CMD ", text)
     text = re.sub(r"[{}\\_^&~#]", " ", text)
     return text
 
 
+def is_caption_chunk(chunk: str) -> bool:
+    return bool(re.match(r"^\s*\\caption(?:\[[^\]]*\])?\{", chunk.strip(), flags=re.DOTALL))
+
+
 def looks_like_prose(chunk: str, inside_skip_env: bool) -> bool:
-    if inside_skip_env:
-        return False
     stripped = chunk.strip()
+    caption_chunk = is_caption_chunk(stripped)
+    if inside_skip_env and not caption_chunk:
+        return False
     if not stripped:
         return False
     if re.search(r"[\u4e00-\u9fff]", stripped):
+        return False
+    if stripped.startswith(r"\newtcolorbox"):
+        return False
+    if stripped.count(r"\textsuperscript") >= 2 and r"\includegraphics" in stripped:
         return False
     if "\\begin{" in stripped or "\\end{" in stripped:
         return False
@@ -527,7 +534,10 @@ def looks_like_prose(chunk: str, inside_skip_env: bool) -> bool:
 
     command_lines = sum(1 for line in stripped.splitlines() if line.strip().startswith("\\"))
     total_lines = max(1, len(stripped.splitlines()))
-    if command_lines / total_lines > 0.6 and not stripped.lstrip().startswith("\\item"):
+    if (
+        command_lines / total_lines > 0.6
+        and not stripped.lstrip().startswith((r"\item", r"\textbf", r"\caption"))
+    ):
         return False
     return True
 
@@ -570,6 +580,25 @@ def insert_xecjk(text: str) -> str:
 def format_bilingual_chunk(original: str, translation: str) -> str:
     if not translation:
         return original
+    caption_match = re.match(
+        r"^(\s*\\caption(?:\[[^\]]*\])?\{)(.*)(\}\s*)$",
+        original,
+        flags=re.DOTALL,
+    )
+    if caption_match:
+        translated_caption = re.match(
+            r"^\s*\\caption(?:\[[^\]]*\])?\{(.*)\}\s*$",
+            translation.strip(),
+            flags=re.DOTALL,
+        )
+        translation_text = translated_caption.group(1) if translated_caption else translation.strip()
+        return (
+            caption_match.group(1)
+            + caption_match.group(2).rstrip()
+            + "\\\\\n"
+            + translation_text.strip()
+            + caption_match.group(3)
+        )
     suffix = "" if original.endswith("\n") else "\n"
     return original + suffix + "\\\\\n" + translation.strip() + "\n"
 
@@ -719,7 +748,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    configure_utf8_stdio()
     args = build_arg_parser().parse_args()
     files = find_tex_files(args.paths)
     if not files:
