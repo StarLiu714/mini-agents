@@ -1,0 +1,4 @@
+interface:
+  display_name: "Insert LaTeX Section into Word"
+  short_description: "Convert and transplant LaTeX into tracked Word"
+  default_prompt: "Use $insert-latex-section-into-word to convert a self-contained LaTeX section and transplant it into an existing Word document with native equations, embedded figures, references, comments, and Track Changes."
