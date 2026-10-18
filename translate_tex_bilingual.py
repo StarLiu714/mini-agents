@@ -3,6 +3,8 @@
 
 The script keeps the original .tex files unchanged and writes *_zhcn.tex files.
 It skips LaTeX files that look like macros, tables, figures, or style helpers.
+Prose-free input/include entry files are copied with bilingual child references.
+Bibliography files and reference environments are left untranslated.
 
 Default workflow:
   python3 translate_tex_bilingual.py Literature_Review
@@ -13,6 +15,8 @@ API config is read from API_key.json and then environment variables:
     "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
     "DEEPSEEK_MODEL": "deepseek-chat"
   }
+
+The short field names key, base_url, and model are also accepted in API_key.json.
 
 OpenRouter-style names from translate_pdf_bilingual.py are also accepted as a
 fallback: OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, and
@@ -42,6 +46,8 @@ SKIP_ENVS = {
     "align",
     "align*",
     "array",
+    "bib",
+    "bibliography",
     "displaymath",
     "equation",
     "equation*",
@@ -56,11 +62,13 @@ SKIP_ENVS = {
     "multline*",
     "picture",
     "pmatrix",
+    "references",
     "smallmatrix",
     "split",
     "subequations",
     "table",
     "table*",
+    "thebibliography",
     "tabular",
     "tabular*",
     "tikzpicture",
@@ -124,12 +132,14 @@ def get_config(args: argparse.Namespace) -> Dict[str, str]:
         or pick("DEEPSEEK_API_KEY")
         or pick("OPENROUTER_API_KEY")
         or pick("OPENAI_API_KEY")
+        or file_values.get("key")
     )
     base_url = (
         args.base_url
         or pick("DEEPSEEK_BASE_URL")
         or pick("OPENROUTER_BASE_URL")
         or pick("OPENAI_BASE_URL")
+        or file_values.get("base_url")
         or "https://api.deepseek.com"
     )
     model = (
@@ -137,6 +147,7 @@ def get_config(args: argparse.Namespace) -> Dict[str, str]:
         or pick("DEEPSEEK_MODEL")
         or pick("OPENROUTER_MODEL")
         or pick("MEMENTO_MINI_MODEL")
+        or file_values.get("model")
         or "deepseek-chat"
     )
 
@@ -176,7 +187,7 @@ def parse_translation_response(content: str) -> Dict[str, str]:
         cleaned = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", cleaned)
         data = json.loads(cleaned)
     if isinstance(data, dict):
-        data = data.get("translations", [])
+        data = [data] if "id" in data else data.get("translations", [])
     if not isinstance(data, list):
         raise ValueError("translation response is not a JSON array")
 
@@ -402,6 +413,8 @@ def translated_input_target_exists(
     if not candidate.is_absolute():
         candidate = tex_path.parent / candidate
     candidate = candidate.resolve()
+    if is_bibliography_file(candidate):
+        return False
     translated = candidate.with_name(f"{candidate.stem}_zhcn{candidate.suffix}")
     if translated.exists():
         return True
@@ -453,7 +466,43 @@ def is_structural_line(line: str) -> bool:
     return False
 
 
+def braced_end(text: str, start: int) -> Optional[int]:
+    """Find the end of a braced argument, ignoring comments and escaped braces."""
+    depth = 0
+    for token in re.finditer(r"\\.|%[^\n]*|[{}]", text[start:]):
+        if token.group() == "{":
+            depth += 1
+        elif token.group() == "}":
+            depth -= 1
+            if depth == 0:
+                return start + token.end()
+    return None
+
+
 def split_latex_chunks(text: str) -> List[str]:
+    # Keep author metadata intact; expose only the body of abstract macros.
+    command = re.search(
+        r"\\(?:author|affil|affiliation)\*?(?:\[[^\]]*\])?\s*\{"
+        r"|\\(?:newcommand|renewcommand|providecommand)\*?\s*"
+        r"\{\\(?:abstractcontent|abscontent)\}\s*\{"
+        r"|\\abstract\s*\{",
+        text,
+    )
+    if command:
+        end = braced_end(text, command.end() - 1)
+        if end is not None:
+            if re.match(r"\\(?:author|affil|affiliation)\b", command.group()):
+                middle = [text[command.start():end]]
+            else:
+                middle = [command.group()]
+                middle.extend(split_latex_chunks(text[command.end():end - 1]))
+                middle.append("}")
+            return (
+                split_latex_chunks(text[:command.start()])
+                + middle
+                + split_latex_chunks(text[end:])
+            )
+
     chunks: List[str] = []
     current: List[str] = []
 
@@ -512,6 +561,8 @@ def looks_like_prose(chunk: str, inside_skip_env: bool) -> bool:
         return False
     if not stripped:
         return False
+    if re.match(r"\\bibitem\b", stripped):
+        return False
     if re.search(r"[\u4e00-\u9fff]", stripped):
         return False
     if stripped.startswith(r"\newtcolorbox"):
@@ -520,7 +571,10 @@ def looks_like_prose(chunk: str, inside_skip_env: bool) -> bool:
         return False
     if "\\begin{" in stripped or "\\end{" in stripped:
         return False
-    if re.match(r"\\(section|subsection|subsubsection|paragraph|title|author)\*?\{", stripped):
+    if re.match(
+        r"\\(?:section|subsection|subsubsection|paragraph|title|author|affil|affiliation|frontpage)\b",
+        stripped,
+    ):
         return False
     if stripped.count("&") >= 2:
         return False
@@ -617,6 +671,8 @@ def rebuild_text(chunks: List[str], blocks: List[TexBlock]) -> str:
 
 def probably_format_file(path: Path, blocks: List[TexBlock]) -> bool:
     stem = path.stem.lower()
+    if is_bibliography_file(path):
+        return True
     if any(hint == stem or hint in stem for hint in FORMAT_HINTS):
         return True
     if not blocks:
@@ -624,16 +680,35 @@ def probably_format_file(path: Path, blocks: List[TexBlock]) -> bool:
     return False
 
 
+def is_bibliography_file(path: Path) -> bool:
+    return bool(re.fullmatch(r"(?:references?|bibliography|bibliographies|refs|bib)(?:[-_].*)?", path.stem.lower()))
+
+
 def collect_translatable_sources(files: Sequence[Path], min_paragraphs: int) -> Set[Path]:
     sources: Set[Path] = set()
+    texts: Dict[Path, str] = {}
     for tex_path in files:
         try:
             text = strip_disabled_conditionals(tex_path.read_text(encoding="utf-8"))
         except UnicodeDecodeError:
             continue
+        if is_bibliography_file(tex_path):
+            continue
+        texts[tex_path.resolve()] = text
         _, blocks = extract_blocks(tex_path, text)
         if not probably_format_file(tex_path, blocks) and len(blocks) >= min_paragraphs:
             sources.add(tex_path.resolve())
+    # Include prose-free entry files transitively, so main -> appendix -> chapter
+    # remains connected even when appendix itself needs no API translation.
+    while True:
+        wrappers = {
+            path for path, text in texts.items()
+            if path not in sources
+            and rewrite_translated_inputs(text, path, sources) != text
+        }
+        if not wrappers:
+            break
+        sources.update(wrappers)
     return sources
 
 
@@ -648,7 +723,9 @@ def process_file(
     chunks, blocks = extract_blocks(tex_path, text)
     out_path = tex_path.with_name(f"{tex_path.stem}_zhcn.tex")
 
-    if probably_format_file(tex_path, blocks) or len(blocks) < args.min_paragraphs:
+    is_entry = bool(translatable_sources and tex_path.resolve() in translatable_sources)
+    has_prose = not probably_format_file(tex_path, blocks) and len(blocks) >= args.min_paragraphs
+    if not has_prose and not is_entry:
         return "skip", len(blocks), out_path
     if args.dry_run:
         return "would_translate", len(blocks), out_path
@@ -663,6 +740,11 @@ def process_file(
         return "exists", len(blocks), out_path
     if config is None:
         raise RuntimeError("internal error: missing API config")
+
+    if not has_prose:
+        output = rewrite_translated_inputs(text, tex_path, translatable_sources)
+        out_path.write_text(insert_xecjk(output), encoding="utf-8")
+        return "translated", 0, out_path
 
     model = config["model"]
     cache_path = Path(args.cache_dir) / f"{tex_path.stem}.{hashlib.sha1(model.encode()).hexdigest()[:10]}.jsonl"
